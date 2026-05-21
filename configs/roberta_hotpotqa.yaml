@@ -1,0 +1,4 @@
+# Inherits base, specific to HotpotQA
+dataset:            hotpotqa
+total_steps:        15000
+output_dir:         /kaggle/working/outputs/roberta_hotpotqa

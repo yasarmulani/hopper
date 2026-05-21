@@ -1,0 +1,18 @@
+# Base config — all other configs inherit from this
+model_family:       encoder_only
+model_name:         roberta-base
+freeze_layers:      8
+hopper_layers:      [8, 9, 10, 11]
+num_slots:          8
+num_heads:          4
+num_relation_types: 16
+tau_start:          1.0
+tau_end:            0.3
+tau_steps:          5000
+lambda_trans:       0.1
+learning_rate:      2e-5
+weight_decay:       0.01
+batch_size:         16
+num_epochs:         3
+max_length:         512
+output_dir:         /kaggle/working/outputs
