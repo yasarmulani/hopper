@@ -1,9 +1,3 @@
-"""
-HOPPER Injector.
-Wraps specified layers of any transformer with HOPPERLayerWrapper.
-One-line config change to switch which layers get HOPPER.
-"""
-
 import torch.nn as nn
 from hopper.injection.layer_wrapper import HOPPERLayerWrapper
 
@@ -20,25 +14,27 @@ class HOPPERInjector:
         num_relation_types: int   = 16,
         tau:                float = 0.5,
     ):
-        """
-        Wraps transformer layers at layer_indices with HOPPER blocks.
+        # RobertaModel loaded directly → encoder is at model.encoder.layer
+        # RobertaForQuestionAnswering → model.roberta.encoder.layer
+        # Try all three patterns
+        layers = None
 
-        model         : HuggingFace transformer model
-        layer_indices : e.g. [8, 9, 10, 11] for last 4 layers of RoBERTa-base
-        """
-        # Get the list of transformer layers
-        # Works for RoBERTa, BERT, and most HuggingFace encoder models
-        try:
+        if hasattr(model, "encoder") and hasattr(model.encoder, "layer"):
+            # RobertaModel loaded directly (our case)
+            layers = model.encoder.layer
+
+        elif hasattr(model, "roberta"):
             layers = model.roberta.encoder.layer
-        except AttributeError:
-            try:
-                layers = model.bert.encoder.layer
-            except AttributeError:
-                raise ValueError(
-                    "Cannot find transformer layers. "
-                    "Supported: RoBERTa, BERT. "
-                    "For T5 use T5HOPPERInjector."
-                )
+
+        elif hasattr(model, "bert"):
+            layers = model.bert.encoder.layer
+
+        if layers is None:
+            raise ValueError(
+                f"Cannot find transformer layers in {type(model).__name__}. "
+                f"Expected model.encoder.layer, model.roberta.encoder.layer, "
+                f"or model.bert.encoder.layer."
+            )
 
         hopper_layers = []
         for i, layer in enumerate(layers):
