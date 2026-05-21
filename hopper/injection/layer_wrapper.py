@@ -1,13 +1,9 @@
 """
 Single layer wrapper.
-Wraps one transformer layer with the full HOPPER block:
-  token embeddings
-  → entity induction
-  → relation induction
-  → hop attention
-  → composition
-  → hop to token
-  → original transformer layer
+Must match RoBERTa's exact calling signature:
+  layer_module(hidden_states, attention_mask, head_mask, 
+               encoder_hidden_states, encoder_attention_mask,
+               past_key_value, output_attentions)
 """
 
 import torch
@@ -24,74 +20,75 @@ class HOPPERLayerWrapper(nn.Module):
 
     def __init__(
         self,
-        transformer_layer,       # original RoBERTa layer
-        d_model:    int,
-        num_slots:  int,
-        num_heads:  int,
+        transformer_layer,
+        d_model:            int,
+        num_slots:          int,
+        num_heads:          int,
         num_relation_types: int,
-        tau:        float = 0.5,
+        tau:                float = 0.5,
     ):
         super().__init__()
-        self.transformer_layer = transformer_layer
-
+        self.transformer_layer  = transformer_layer
         self.entity_induction   = EntityInductionLayer(d_model, num_slots, tau)
         self.relation_induction = RelationInductionLayer(d_model, num_relation_types)
         self.hop_attention      = HopAttention(d_model, num_heads)
         self.composition        = CompositionOperator(d_model, num_slots)
         self.hop_to_token       = HopToTokenBridge(d_model)
-
-        # Confidence initialiser: raw weights before sigmoid
-        self.w_raw = nn.Parameter(torch.zeros(num_slots))
+        self.w_raw              = nn.Parameter(torch.zeros(num_slots))
 
     def forward(
         self,
-        hidden_states:   torch.Tensor,
-        attention_mask:  torch.Tensor = None,
+        hidden_states:              torch.Tensor,        # (B, T, d)
+        attention_mask:             torch.Tensor = None, # (B, 1, 1, T) — RoBERTa extended mask
+        head_mask:                  torch.Tensor = None,
+        encoder_hidden_states:      torch.Tensor = None,
+        encoder_attention_mask:     torch.Tensor = None,
+        past_key_value                           = None,
+        output_attentions:          bool         = False,
         **kwargs,
     ):
-        """
-        hidden_states : (B, T, d)
-        Returns (hidden_states, hop_batch) — same interface as transformer layer
-        plus hop_batch for loss computation and interpretability.
-        """
         B, T, d = hidden_states.shape
 
-        # ── HOPPER reasoning block ────────────────────────────
-        # 1. Entity induction
-        entities, routing = self.entity_induction(
-            hidden_states, attention_mask
-        )  # (B, M, d), (B, T, M)
+        # ── Unpack attention mask for entity induction ──────────
+        # RoBERTa passes extended mask of shape (B, 1, 1, T)
+        # with 0.0 for real tokens and -10000.0 for padding.
+        # Convert to binary (B, T) for our routing.
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # (B, 1, 1, T) → (B, T): real tokens are 0.0, padding is large negative
+            binary_mask = (attention_mask.squeeze(1).squeeze(1) > -1).long()
+        elif attention_mask is not None and attention_mask.dim() == 2:
+            binary_mask = attention_mask
+        else:
+            binary_mask = torch.ones(B, T, device=hidden_states.device, dtype=torch.long)
 
-        # 2. Relation induction
-        relations, type_dist = self.relation_induction(entities)
+        # ── HOPPER reasoning block ───────────────────────────────
+        entities, routing = self.entity_induction(hidden_states, binary_mask)
+        relations, _      = self.relation_induction(entities)
 
-        # 3. Initial confidence weights
-        w = torch.sigmoid(self.w_raw).unsqueeze(0).expand(B, -1)  # (B, M)
-
-        # 4. Assemble hop batch
+        w    = torch.sigmoid(self.w_raw).unsqueeze(0).expand(B, -1)
         hops = HopBatch(
             e_head  = entities,
             r       = relations,
-            e_tail  = entities,   # initially head == tail; composition refines
+            e_tail  = entities,
             w       = w,
             routing = routing,
         )
+        hops           = self.hop_attention(hops)
+        hops           = self.composition(hops)
+        hidden_states  = self.hop_to_token(hidden_states, hops)
 
-        # 5. Hop attention (hops interact)
-        hops = self.hop_attention(hops)
-
-        # 6. Composition (chain hops)
-        hops = self.composition(hops)
-
-        # 7. Hop to token (inject reasoning back)
-        hidden_states = self.hop_to_token(hidden_states, hops)
-
-        # ── Original transformer layer ────────────────────────
+        # ── Original RoBERTa layer ───────────────────────────────
         layer_outputs = self.transformer_layer(
             hidden_states,
-            attention_mask=attention_mask,
-            **kwargs,
+            attention_mask,
+            head_mask,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            past_key_value,
+            output_attentions,
         )
+
         hidden_states = layer_outputs[0]
 
+        # Return (hidden_states, hop_batch, ...rest of layer outputs)
         return (hidden_states, hops) + layer_outputs[1:]
