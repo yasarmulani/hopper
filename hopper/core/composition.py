@@ -54,8 +54,11 @@ class CompositionOperator(nn.Module):
         compat    = torch.sigmoid(compat)          # (B, M, M) ∈ (0,1)
 
         # Mask self-composition
-        eye = torch.eye(M, device=hops.e_head.device).bool().unsqueeze(0)
+        # This line is actually fine (0.0 is safe in fp16)
+        # But eye creation needs dtype=torch.bool explicitly:
+        eye = torch.eye(M, device=hops.e_head.device, dtype=torch.bool).unsqueeze(0)
         compat = compat.masked_fill(eye, 0.0)
+
 
         # For each pair (i,j) with high compatibility, compute composed hop
         # Use soft composition weighted by compatibility

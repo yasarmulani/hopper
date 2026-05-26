@@ -1,14 +1,8 @@
-"""
-HOPPER Trainer.
-Handles training loop, evaluation, checkpointing,
-temperature annealing, and metric logging.
-"""
-
 import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler   # fixed import
 from tqdm import tqdm
 from hopper.training.loss import HOPPERLoss
 from hopper.evaluation.evaluator import HOPPEREvaluator
@@ -26,14 +20,12 @@ class HOPPERTrainer:
             lambda_trans=config.get("lambda_trans", 0.1)
         )
 
-        # Optimizer — AdamW with weight decay
         self.optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, model.parameters()),
             lr           = config.get("learning_rate", 2e-5),
             weight_decay = config.get("weight_decay", 0.01),
         )
 
-        # LR scheduler
         self.scheduler = torch.optim.lr_scheduler.LinearLR(
             self.optimizer,
             start_factor = 1.0,
@@ -41,14 +33,11 @@ class HOPPERTrainer:
             total_iters  = config.get("total_steps", 10000),
         )
 
-        # FP16 scaler for P100
-        self.scaler = GradScaler()
-
+        self.scaler      = GradScaler("cuda")   # fixed
         self.evaluator   = HOPPEREvaluator(device)
         self.global_step = 0
         self.best_f1     = 0.0
 
-        # Temperature annealing schedule
         self.tau_start = config.get("tau_start", 1.0)
         self.tau_end   = config.get("tau_end",   0.3)
         self.tau_steps = config.get("tau_steps", 5000)
@@ -56,7 +45,6 @@ class HOPPERTrainer:
         os.makedirs(config.get("output_dir", "outputs"), exist_ok=True)
 
     def _get_tau(self) -> float:
-        """Linear temperature annealing."""
         progress = min(self.global_step / self.tau_steps, 1.0)
         return self.tau_start - progress * (self.tau_start - self.tau_end)
 
@@ -72,14 +60,13 @@ class HOPPERTrainer:
             start_targets  = batch["start_positions"].to(self.device)
             end_targets    = batch["end_positions"].to(self.device)
 
-            # Anneal temperature
             tau = self._get_tau()
             if hasattr(self.model, "set_temperature"):
                 self.model.set_temperature(tau)
 
             self.optimizer.zero_grad()
 
-            with autocast():
+            with autocast("cuda"):   # fixed
                 start_logits, end_logits, hop_batches = self.model(
                     input_ids, attention_mask
                 )
@@ -90,11 +77,8 @@ class HOPPERTrainer:
                 )
 
             self.scaler.scale(losses["loss"]).backward()
-
-            # Gradient clipping
             self.scaler.unscale_(self.optimizer)
             nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.scheduler.step()
@@ -131,12 +115,7 @@ class HOPPERTrainer:
         }, path)
         print(f"Checkpoint saved: {path}")
 
-    def train(
-        self,
-        train_loader: DataLoader,
-        val_loader:   DataLoader,
-        dataset_name: str,
-    ):
+    def train(self, train_loader, val_loader, dataset_name):
         num_epochs  = self.config.get("num_epochs", 3)
         output_dir  = self.config.get("output_dir", "outputs")
         all_metrics = []
@@ -154,14 +133,12 @@ class HOPPERTrainer:
                   f"F1={val_metrics.get('f1', 0):.4f}  "
                   f"SuppF1={val_metrics.get('supporting_fact_f1', 0):.4f}")
 
-            # Save best checkpoint
             if val_metrics.get("f1", 0) > self.best_f1:
                 self.best_f1 = val_metrics.get("f1", 0)
                 self.save_checkpoint(
                     os.path.join(output_dir, "best_model.pt"), metrics
                 )
 
-        # Save all metrics
         with open(os.path.join(output_dir, "metrics.json"), "w") as f:
             json.dump(all_metrics, f, indent=2)
 
